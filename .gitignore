@@ -1,0 +1,71 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+MANIFEST
+
+# Environments
+.env
+.env.*
+.venv/
+venv/
+env/
+ENV/
+.ipynb_venv/
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+pip-wheel-metadata/
+
+# Unit test / coverage reports
+.coverage
+.coverage.*
+.cache/
+.pytest_cache/
+nosetests.xml
+coverage.xml
+htmlcov/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# PyTorch / model artifacts
+*.ckpt
+*.pth
+*.pt
+*.h5
+*.pkl
+
+# Local datasets and experiment outputs (remove if versioning data)
+GBM_Result/
+results/
+outputs/
+logs/
+img/
+
+# IDE / editor configs
+.idea/
+.vscode/
+*.sublime-workspace
+*.sublime-project
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Miscellaneous
+*.log
+*.tmp
+*.swp
+*~

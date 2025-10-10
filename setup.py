@@ -22,8 +22,8 @@ install_packages = [
 
 setup(
     name='AttentionMOI',
-    author='Kaushik',
-    author_email='kaushikrajn@gmail.com',
+    author='',
+    author_email='',
     version='0.1.2',
     python_requires=">=3.9",
     packages=find_packages(),

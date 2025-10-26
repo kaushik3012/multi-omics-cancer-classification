@@ -49,6 +49,9 @@ def get_args():
     # different models
     parser.add_argument('-m', '--model', help='OPTIONAL: Model names, choosing from DNN, Net (Net for AttentionMOI), RF, XGboost, svm, mogonet, moanna, default=DNN.', type=str, default="DNN")
 
+    # ---- Explainability ----
+    parser.add_argument('--explain', action='store_true', help='Generate integrated gradients explanations for supported models.')
+
     args = parser.parse_args()
     return args
 

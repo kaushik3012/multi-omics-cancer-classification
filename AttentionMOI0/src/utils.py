@@ -1,25 +1,9 @@
-import os, sys, time, gzip
+import os, sys, time, torch, gzip
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 from sklearn.metrics import f1_score, recall_score, roc_auc_score, precision_score, accuracy_score
+from captum.attr import IntegratedGradients
 from sklearn.impute import KNNImputer
-
-
-def _lazy_import_torch_and_captum():
-    try:
-        import torch
-    except ImportError as exc:
-        raise ImportError(
-            "This operation requires the 'torch' package. Please install PyTorch to continue."
-        ) from exc
-    try:
-        from captum.attr import IntegratedGradients
-    except ImportError as exc:
-        raise ImportError(
-            "This operation requires the 'captum' package. Install captum>=0.4.1 to generate attributions."
-        ) from exc
-    return torch, IntegratedGradients
 
 
 def clin_read_tsi(in_file, out_file, task, threshold=2):
@@ -134,7 +118,6 @@ def evaluate(pred_prob, real_label, average="macro"):
 
 # for explain dnn model
 def ig(args, model, dataset, feature_names, omic_group, target=1):
-    torch, IntegratedGradients = _lazy_import_torch_and_captum()
     # prepare input data
     input_tensor_list = [data for data, labels in dataset]
     input_tensor = torch.cat(input_tensor_list, 0)
@@ -145,8 +128,8 @@ def ig(args, model, dataset, feature_names, omic_group, target=1):
 
     # calculating feature importance using IG
     attr, _ = ig.attribute(input_tensor, return_convergence_delta=True, target=target)
-    attr_np = attr.detach().numpy()
-    feat_importance = np.mean(attr_np, axis=0)
+    attr = attr.detach().numpy()
+    feat_importance = np.mean(attr, axis=0)
 
     # result
     df_imp = pd.DataFrame({'Feature': feature_names,
@@ -169,12 +152,10 @@ def ig(args, model, dataset, feature_names, omic_group, target=1):
         else:
             df_imp.to_csv(os.path.join(args.outdir, 'feature_importance_{}_DNN_{}_target{}.csv'.format(args.method, args.omic_name, target)),index=False)
 
-    _save_ig_plots(args, attr_np, feature_names, omic_group, target, model_tag="DNN")
     return df_imp
 
  # for explain net model
 def ig_net(args, model, dataset, feature_names, omic_group, target=1):
-    torch, IntegratedGradients = _lazy_import_torch_and_captum()
     # prepare input data
     input_tensor_dna, input_tensor_rna = [], []
     for data_dna, data_rna, labels in dataset:
@@ -189,12 +170,9 @@ def ig_net(args, model, dataset, feature_names, omic_group, target=1):
     # calculating feature importance using IG
     attr, _ = ig.attribute((input_tensor_dna, input_tensor_rna), return_convergence_delta=True, target=target)
     feat_importance = []
-    attr_concat = []
     for tensor in attr:
         tensor = tensor.detach().numpy()
         feat_importance.append(np.mean(tensor, axis=0))
-        attr_concat.append(tensor)
-    attr_all = np.concatenate(attr_concat, axis=1)
 
     # result
     df_imp = pd.DataFrame({'Feature': feature_names,
@@ -223,75 +201,4 @@ def ig_net(args, model, dataset, feature_names, omic_group, target=1):
         else:
             df_imp.to_csv(os.path.join(args.outdir, 'feature_importance_{}_Net_{}_target{}.csv'.format(args.method, args.omic_name, target)),
                           index=False)
-    _save_ig_plots(args, attr_all, feature_names, omic_group, target, model_tag="Net")
     return df_imp
-
-
-def _format_omic_name_for_ig(omic_name):
-    if isinstance(omic_name, (list, tuple)):
-        return "_".join(str(v) for v in omic_name)
-    return str(omic_name)
-
-
-def _build_ig_prefix(args, model_tag, target):
-    omic_tag = _format_omic_name_for_ig(getattr(args, "omic_name", "NA"))
-    if getattr(args, "clin_file", None):
-        omic_tag = f"{omic_tag}_clin"
-    fsd_tag = f"FSD_{args.method}" if getattr(args, "FSD", False) else str(getattr(args, "method", "NA"))
-    return f"{fsd_tag}_{model_tag}_{omic_tag}_target{target}"
-
-
-def _save_ig_plots(args, attr_values, feature_names, omic_group, target, model_tag):
-    if attr_values is None:
-        return
-    attr_values = np.asarray(attr_values)
-    if attr_values.ndim != 2 or attr_values.shape[1] != len(feature_names):
-        return
-
-    os.makedirs(args.outdir, exist_ok=True)
-    prefix = _build_ig_prefix(args, model_tag, target)
-
-    mean_abs = np.mean(np.abs(attr_values), axis=0)
-    order = np.argsort(mean_abs)[::-1]
-    max_display = min(20, len(order))
-    top_idx = order[:max_display]
-    top_features = [feature_names[i] for i in top_idx]
-
-    # Bar plot
-    plt.figure()
-    y_positions = np.arange(len(top_idx))[::-1]
-    ordered_features = [feature_names[i] for i in top_idx]
-    plt.barh(y_positions, mean_abs[top_idx], color="steelblue")
-    plt.yticks(y_positions, ordered_features)
-    plt.xlabel("Mean |Integrated Gradient|")
-    plt.title(f"{model_tag} Target {target} IG Global Importance")
-    plt.tight_layout()
-    plt.savefig(os.path.join(args.outdir, f"summary_bar_IG_{prefix}.png"), dpi=200, bbox_inches="tight")
-    plt.close()
-
-    # Beeswarm-like plot
-    rng = np.random.default_rng(getattr(args, "seed", 42))
-    plt.figure()
-    scatter_artist = None
-    positions = np.arange(len(top_idx))[::-1]
-    for pos, feat_idx in zip(positions, top_idx):
-        y = np.full(attr_values.shape[0], pos, dtype=float)
-        y += rng.normal(0, 0.1, size=y.shape)
-        scatter_artist = plt.scatter(
-            attr_values[:, feat_idx],
-            y,
-            c=attr_values[:, feat_idx],
-            cmap="coolwarm",
-            alpha=0.6,
-            s=12,
-            edgecolors="none",
-        )
-    plt.yticks(positions, ordered_features)
-    plt.axvline(0, color="black", linewidth=0.8, linestyle="--")
-    plt.xlabel("Integrated Gradient contribution")
-    plt.title(f"{model_tag} Target {target} IG Beeswarm")
-    if scatter_artist is not None:
-        plt.colorbar(scatter_artist, label="Integrated Gradient value")
-    plt.tight_layout()
-    plt.savefig(os.path.join(args.outdir, f"summary_beeswarm_IG_{prefix}.png"), dpi=200, bbox_inches="tight")
-    plt.close()

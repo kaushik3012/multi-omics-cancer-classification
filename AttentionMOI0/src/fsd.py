@@ -6,6 +6,7 @@ from scipy import stats
 from sklearn.model_selection import train_test_split
 from .preprocess import read_dataset
 from tqdm import tqdm
+import torch
 from .feature_selection import anova, rfe, lasso, pca  # import methods of Feature selection
 
 
@@ -53,20 +54,6 @@ def feature_selection_distribution(args):
     # 1. to read input files
     df_omics, df_label, df_clin = read_dataset(args)
     labels = df_label.label.values
-
-    if labels.size == 0:
-        raise ValueError(
-            "[feature_selection_distribution] No samples remain after aligning omics, label, and clinical data. "
-            "Verify that the sample IDs intersect across all provided files."
-        )
-
-    unique_labels = np.unique(labels)
-    if unique_labels.size < 2:
-        raise ValueError(
-            "[feature_selection_distribution] At least two distinct label values are required for distribution testing. "
-            f"Only found {unique_labels.size} unique label(s): {unique_labels}. "
-            "Please check the label file or adjust the dataset."
-        )
 
     # 2. fix random seed
     np.random.seed(args.seed)

@@ -52,12 +52,6 @@ def process(df_omics, df_label, df_clin):
     for i in range(1, len(patients)):
         patients_shared = list(set(patients_shared).intersection(patients[i]))
 
-    if len(patients_shared) == 0:
-        raise ValueError(
-            "[preprocess] No shared patient identifiers found across the provided omics, label, and clinical files. "
-            "Please ensure that the row indices (sample IDs) match across all inputs."
-        )
-
     # extract shared patients' data
     for i in range(len(df_omics)):
         df_omics[i] = df_omics[i].loc[patients_shared, :].sort_index()

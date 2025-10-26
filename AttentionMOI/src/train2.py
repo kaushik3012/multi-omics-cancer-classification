@@ -9,6 +9,32 @@ import joblib
 from .utils import evaluate
 
 
+def _select_device(args, torch):
+    requested = getattr(args, "device", None)
+    has_cuda = torch.cuda.is_available()
+    has_mps = hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+
+    if requested:
+        req = str(requested).lower()
+        if req == "cuda":
+            if not has_cuda:
+                raise ValueError("Requested CUDA device via --device, but CUDA is not available.")
+            return torch.device("cuda")
+        if req == "mps":
+            if not has_mps:
+                raise ValueError("Requested MPS device via --device, but MPS is not available.")
+            return torch.device("mps")
+        if req == "cpu":
+            return torch.device("cpu")
+        print(f"[Warn] Unknown device string '{requested}' provided; falling back to automatic selection.")
+
+    if has_cuda:
+        return torch.device("cuda")
+    if has_mps:
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
 # builing machine learning models
 def ml_models(args, data, chosen_feat_name, chosen_omic_group, labels, model_name):
     """
@@ -109,6 +135,7 @@ def ml_models(args, data, chosen_feat_name, chosen_omic_group, labels, model_nam
         from .explain import explain_ml_shap
         explain_ml_shap(args, model, X_train, X_test, chosen_feat_name, chosen_omic_group, model_name)
 
+
 # using DNN model
 def train(args, data, labels):
     try:
@@ -122,6 +149,9 @@ def train(args, data, labels):
         ) from exc
     from .module import DeepMOI
 
+    device = _select_device(args, torch)
+    print(f"[Info] Using device: {device}")
+
     dataset = []
     for i in range(len(labels)):
         dataset.append([torch.tensor(data[i], dtype=torch.float),
@@ -130,7 +160,7 @@ def train(args, data, labels):
     # in_dim, out_dim
     dim_out = len(set(labels))
     in_dim = data.shape[1]
-    model = DeepMOI(in_dim, dim_out)
+    model = DeepMOI(in_dim, dim_out).to(device)
     optimizer = torch.optim.Adam(model.parameters(),
                                  lr=args.lr, weight_decay=args.weight_decay)
     dataset_train, dataset_test = train_test_split(
@@ -149,19 +179,21 @@ def train(args, data, labels):
         model.train()
         loss_epoch = []
         y_pred_probs, real_labels = [], []
-        for data, labels in train_loader:
-            out = model(data)
+        for data_batch, label_batch in train_loader:
+            data_batch = data_batch.to(device)
+            label_batch = label_batch.to(device)
+            out = model(data_batch)
             out = out.squeeze(-1)
             # loss
-            loss = nn.CrossEntropyLoss()(out, labels)
+            loss = nn.CrossEntropyLoss()(out, label_batch)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             loss_epoch.append(loss.item())
             # prediction
-            y_pred_prob = F.softmax(out, dim=-1).detach().tolist()
+            y_pred_prob = F.softmax(out, dim=-1).detach().cpu().numpy()
             y_pred_probs.append(y_pred_prob)
-            real_labels.append(labels)
+            real_labels.append(label_batch.detach().cpu().numpy())
         if len(loss_epoch) == 0 or len(y_pred_probs) == 0:
             raise ValueError(
                 "[train] No training batches were generated. "
@@ -181,17 +213,19 @@ def train(args, data, labels):
             # test metrics
             loss_epoch = []
             y_pred_probs, real_labels = [], []
-            for data, labels in test_loader:
-                out = model(data)
+            for data_batch, label_batch in test_loader:
+                data_batch = data_batch.to(device)
+                label_batch = label_batch.to(device)
+                out = model(data_batch)
                 out = out.squeeze(-1)
                 # loss
-                loss = nn.CrossEntropyLoss()(out, labels)
+                loss = nn.CrossEntropyLoss()(out, label_batch)
                 optimizer.zero_grad()
                 loss_epoch.append(loss.item())
                 # predict labels
-                y_pred_prob = F.softmax(out, dim=-1).detach().tolist()
+                y_pred_prob = F.softmax(out, dim=-1).detach().cpu().numpy()
                 y_pred_probs.append(y_pred_prob)
-                real_labels.append(labels)
+                real_labels.append(label_batch.detach().cpu().numpy())
 
             if len(loss_epoch) == 0 or len(y_pred_probs) == 0:
                 raise ValueError(
@@ -211,23 +245,19 @@ def train(args, data, labels):
         if args.FSD:
             if args.clin_file:
                 txt.writelines(f"DNN\tFSD_{args.method}\t{args.omic_name} clin\t{acc}\t{prec}\t{f1}\t{auc}\t{recall}\n")
-                # to save model
                 torch.save(model, os.path.join(args.outdir,
                                                'model_DNN_FSD_{}_{}_clin_{}.pt'.format(args.method, args.omic_name, args.seed)))
             else:
                 txt.writelines(f"DNN\tFSD_{args.method}\t{args.omic_name}\t{acc}\t{prec}\t{f1}\t{auc}\t{recall}\n")
-                # to save model
                 torch.save(model, os.path.join(args.outdir,
                                                'model_DNN_FSD_{}_{}_{}.pt'.format(args.method, args.omic_name, args.seed)))
         else:
             if args.clin_file:
                 txt.writelines(f"DNN\t{args.method}\t{args.omic_name} clin\t{acc}\t{prec}\t{f1}\t{auc}\t{recall}\n")
-                # to save model
                 torch.save(model, os.path.join(args.outdir,
                                                'model_DNN_{}_{}_clin_{}.pt'.format(args.method, args.omic_name, args.seed)))
             else:
                 txt.writelines(f"DNN\t{args.method}\t{args.omic_name}\t{acc}\t{prec}\t{f1}\t{auc}\t{recall}\n")
-                # to save model
                 torch.save(model, os.path.join(args.outdir,
                                                'model_DNN_{}_{}_{}.pt'.format(args.method, args.omic_name, args.seed)))
     txt.close()
@@ -246,6 +276,9 @@ def train_net(args, data, chosen_omic_group, labels):
             "Model 'Net' requires the 'torch' package. Please install PyTorch to use this model."
         ) from exc
     from .module import Net
+
+    device = _select_device(args, torch)
+    print(f"[Info] Using device: {device}")
 
     idx_rna = []
     for i, v in enumerate(chosen_omic_group):
@@ -269,7 +302,7 @@ def train_net(args, data, chosen_omic_group, labels):
     dim_dna = data_dna.shape[1]
     dim_rna = data_rna.shape[1]
     dim_out = len(set(labels))
-    model = Net(dim_dna, dim_rna, dim_out)
+    model = Net(dim_dna, dim_rna, dim_out).to(device)
     optimizer = torch.optim.Adam(model.parameters(),
                                  lr=args.lr,
                                  weight_decay=args.weight_decay)
@@ -292,19 +325,22 @@ def train_net(args, data, chosen_omic_group, labels):
         model.train()
         loss_epoch = []
         y_pred_probs, real_labels = [], []
-        for data_dna, data_rna, labels in train_loader:
-            out = model(data_dna, data_rna).to()
+        for data_dna_batch, data_rna_batch, label_batch in train_loader:
+            data_dna_batch = data_dna_batch.to(device)
+            data_rna_batch = data_rna_batch.to(device)
+            label_batch = label_batch.to(device)
+            out = model(data_dna_batch, data_rna_batch)
             out = out.squeeze(-1)
             # loss
-            loss = nn.CrossEntropyLoss()(out, labels)
+            loss = nn.CrossEntropyLoss()(out, label_batch)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             loss_epoch.append(loss.item())
             # prediction
-            y_pred_prob = F.softmax(out, dim=-1).detach().tolist()
+            y_pred_prob = F.softmax(out, dim=-1).detach().cpu().numpy()
             y_pred_probs.append(y_pred_prob)
-            real_labels.append(labels)
+            real_labels.append(label_batch.detach().cpu().numpy())
         loss_epoch = np.mean(loss_epoch)
         y_pred_probs = np.concatenate(y_pred_probs)
         real_labels = np.concatenate(real_labels)
@@ -319,17 +355,20 @@ def train_net(args, data, chosen_omic_group, labels):
             # test metrics
             loss_epoch = []
             y_pred_probs, real_labels = [], []
-            for data_dna, data_rna, labels in test_loader:
-                out = model(data_dna, data_rna)
+            for data_dna_batch, data_rna_batch, label_batch in test_loader:
+                data_dna_batch = data_dna_batch.to(device)
+                data_rna_batch = data_rna_batch.to(device)
+                label_batch = label_batch.to(device)
+                out = model(data_dna_batch, data_rna_batch)
                 out = out.squeeze(-1)
                 # loss
-                loss = nn.CrossEntropyLoss()(out, labels)
+                loss = nn.CrossEntropyLoss()(out, label_batch)
                 optimizer.zero_grad()
                 loss_epoch.append(loss.item())
                 # predict labels
-                y_pred_prob = F.softmax(out, dim=-1).detach().tolist()
+                y_pred_prob = F.softmax(out, dim=-1).detach().cpu().numpy()
                 y_pred_probs.append(y_pred_prob)
-                real_labels.append(labels)
+                real_labels.append(label_batch.detach().cpu().numpy())
 
             loss_epoch = np.mean(loss_epoch)
             y_pred_probs = np.concatenate(y_pred_probs)
@@ -347,30 +386,24 @@ def train_net(args, data, chosen_omic_group, labels):
         if args.FSD:
             if args.clin_file:
                 txt.writelines(f"Net\tFSD_{args.method}\t{args.omic_name} clin\t{acc}\t{prec}\t{f1}\t{auc}\t{recall}\n")
-                # to save model
                 torch.save(model, os.path.join(args.outdir,
                                                'model_Net_FSD_{}_{}_clin_{}.pt'.format(args.method, args.omic_name, args.seed)))
             else:
                 txt.writelines(f"Net\tFSD_{args.method}\t{args.omic_name}\t{acc}\t{prec}\t{f1}\t{auc}\t{recall}\n")
-                # to save model
                 torch.save(model, os.path.join(args.outdir,
                                                'model_Net_FSD_{}_{}_{}.pt'.format(args.method, args.omic_name, args.seed)))
         else:
             if args.clin_file:
                 txt.writelines(f"Net\t{args.method}\t{args.omic_name} clin\t{acc}\t{prec}\t{f1}\t{auc}\t{recall}\n")
-                # to save model
                 torch.save(model, os.path.join(args.outdir,
                                                'model_Net_{}_{}_clin_{}.pt'.format(args.method, args.omic_name, args.seed)))
             else:
                 txt.writelines(f"Net\t{args.method}\t{args.omic_name}\t{acc}\t{prec}\t{f1}\t{auc}\t{recall}\n")
-                # to save model
                 torch.save(model, os.path.join(args.outdir,
                                                'model_Net_{}_{}_{}.pt'.format(args.method, args.omic_name, args.seed)))
     txt.close()
 
-
     return model, test_loader
-
 
 
 def evaluation(model, dataset):
@@ -381,17 +414,31 @@ def evaluation(model, dataset):
     dataset: training dataset or testing dataset.
     """
     try:
+        import torch
         import torch.nn.functional as F
     except ImportError as exc:
         raise ImportError(
             "Evaluating torch-based models requires the 'torch' package. Please install PyTorch to use this helper."
         ) from exc
+    device = next(model.parameters()).device
+    was_training = model.training
+    model.eval()
     y_pred_probs, real_labels = [], []
-    for d in dataset:
-        out = model(d[0])
-        y_pred_prob = F.softmax(out, dim=-1).detach().tolist()
-        y_pred_probs.append(y_pred_prob)
-        real_labels.append(d[1].tolist())
+    with torch.no_grad():
+        for data_batch, label_batch in dataset:
+            data_batch = data_batch.to(device)
+            label_batch = label_batch.to(device)
+            out = model(data_batch)
+            out = out.squeeze(-1)
+            y_pred_prob = F.softmax(out, dim=-1).detach().cpu().numpy()
+            y_pred_probs.append(np.atleast_2d(y_pred_prob))
+            real_labels.append(np.atleast_1d(label_batch.detach().cpu().numpy()))
+    if not y_pred_probs or not real_labels:
+        raise ValueError("[evaluation] Dataset contained no samples to evaluate.")
+    y_pred_probs = np.concatenate(y_pred_probs, axis=0)
+    real_labels = np.concatenate(real_labels, axis=0)
+    if was_training:
+        model.train()
     acc, prec, f1, auc, recall = evaluate(pred_prob=np.array(y_pred_probs),
                                           real_label=np.array(real_labels))
     return acc, prec, f1, auc, recall
@@ -409,6 +456,9 @@ def train_moanna(args, data, labels):
             "Model 'moanna' requires the 'torch' package. Please install PyTorch to use this model."
         ) from exc
     from .moanna.model.Moanna import Moanna, Moanna_cls
+
+    device = _select_device(args, torch)
+    print(f"[Info] Using device: {device}")
 
     # Pre-defined hyperparameters
     params = {}
@@ -434,7 +484,7 @@ def train_moanna(args, data, labels):
         params["num_classes"], 
         params["fnn_number_layers"], 
         0.1,
-    ) 
+    ).to(device)
     
     model_cls = Moanna_cls(
         params["input_size"], 
@@ -446,7 +496,7 @@ def train_moanna(args, data, labels):
         params["num_classes"], 
         params["fnn_number_layers"], 
         0.1,
-    ) 
+    ).to(device)
     
     
     dataset = []
@@ -454,9 +504,6 @@ def train_moanna(args, data, labels):
         dataset.append([torch.tensor(data[i], dtype=torch.float),
                         torch.tensor(labels[i], dtype=torch.long)])
 
-    # in_dim, out_dim
-    dim_out = len(set(labels))
-    in_dim = data.shape[1]
     optimizer = torch.optim.Adam(model.parameters(),
                                  lr=args.lr, weight_decay=args.weight_decay)
     dataset_train, dataset_test = train_test_split(
@@ -470,13 +517,13 @@ def train_moanna(args, data, labels):
     train_loader = DataLoader(dataset_train, batch_size=args.batch)
     test_loader = DataLoader(dataset_test, batch_size=args.batch, shuffle=True, drop_last=False)
 
-    # 先train 编码器和解码器
-    criterion1 = torch.nn.MSELoss(reduce=True)
+    criterion1 = torch.nn.MSELoss(reduction="mean")
     for _ in range(50):
         model.train()
-        for data, labels in train_loader:
-            encoded, decoded = model(data)
-            loss = criterion1(decoded, data)
+        for data_batch, _ in train_loader:
+            data_batch = data_batch.to(device)
+            encoded, decoded = model(data_batch)
+            loss = criterion1(decoded, data_batch)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -486,20 +533,20 @@ def train_moanna(args, data, labels):
         model_cls.train()
         loss_epoch = []
         y_pred_probs, real_labels = [], []
-        for data, labels in train_loader:
-            encoded, decoded = model(data)
+        for data_batch, label_batch in train_loader:
+            data_batch = data_batch.to(device)
+            label_batch = label_batch.to(device)
+            encoded, decoded = model(data_batch)
             out = model_cls(encoded)
-    #         out = out.squeeze(-1)
-    #         # loss
-            loss = nn.CrossEntropyLoss()(out, labels)
+            loss = nn.CrossEntropyLoss()(out, label_batch)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             loss_epoch.append(loss.item())
             # prediction
-            y_pred_prob = F.softmax(out, dim=-1).detach().tolist()
+            y_pred_prob = F.softmax(out, dim=-1).detach().cpu().numpy()
             y_pred_probs.append(y_pred_prob)
-            real_labels.append(labels)
+            real_labels.append(label_batch.detach().cpu().numpy())
         loss_epoch = np.mean(loss_epoch)
         y_pred_probs = np.concatenate(y_pred_probs)
         real_labels = np.concatenate(real_labels)
@@ -514,18 +561,17 @@ def train_moanna(args, data, labels):
             # test metrics
             loss_epoch = []
             y_pred_probs, real_labels = [], []
-            for data, labels in test_loader:
-                encoded, decoded = model(data)
+            for data_batch, label_batch in test_loader:
+                data_batch = data_batch.to(device)
+                label_batch = label_batch.to(device)
+                encoded, decoded = model(data_batch)
                 out = model_cls(encoded)
-                # out = out.squeeze(-1)
-                # loss
-                loss = nn.CrossEntropyLoss()(out, labels)
+                loss = nn.CrossEntropyLoss()(out, label_batch)
                 optimizer.zero_grad()
                 loss_epoch.append(loss.item())
-                # predict labels
-                y_pred_prob = F.softmax(out, dim=-1).detach().tolist()
+                y_pred_prob = F.softmax(out, dim=-1).detach().cpu().numpy()
                 y_pred_probs.append(y_pred_prob)
-                real_labels.append(labels)
+                real_labels.append(label_batch.detach().cpu().numpy())
 
             loss_epoch = np.mean(loss_epoch)
             y_pred_probs = np.concatenate(y_pred_probs)
@@ -540,23 +586,19 @@ def train_moanna(args, data, labels):
         if args.FSD:
             if args.clin_file:
                 txt.writelines(f"DNN\tFSD_{args.method}\t{args.omic_name} clin\t{acc}\t{prec}\t{f1}\t{auc}\t{recall}\n")
-                # to save model
                 torch.save(model, os.path.join(args.outdir,
                                                'model_DNN_FSD_{}_{}_clin_{}.pt'.format(args.method, args.omic_name, args.seed)))
             else:
                 txt.writelines(f"DNN\tFSD_{args.method}\t{args.omic_name}\t{acc}\t{prec}\t{f1}\t{auc}\t{recall}\n")
-                # to save model
                 torch.save(model, os.path.join(args.outdir,
                                                'model_DNN_FSD_{}_{}_{}.pt'.format(args.method, args.omic_name, args.seed)))
         else:
             if args.clin_file:
                 txt.writelines(f"DNN\t{args.method}\t{args.omic_name} clin\t{acc}\t{prec}\t{f1}\t{auc}\t{recall}\n")
-                # to save model
                 torch.save(model, os.path.join(args.outdir,
                                                'model_DNN_{}_{}_clin_{}.pt'.format(args.method, args.omic_name, args.seed)))
             else:
                 txt.writelines(f"DNN\t{args.method}\t{args.omic_name}\t{acc}\t{prec}\t{f1}\t{auc}\t{recall}\n")
-                # to save model
                 torch.save(model, os.path.join(args.outdir,
                                                'model_DNN_{}_{}_{}.pt'.format(args.method, args.omic_name, args.seed)))
     txt.close()
@@ -604,4 +646,3 @@ def train_mogonet(args, data, labels):
     with open(os.path.join(args.outdir, 'log.txt'), 'a') as file:
         for log in logs:
             file.writelines(log + '\n')
-    

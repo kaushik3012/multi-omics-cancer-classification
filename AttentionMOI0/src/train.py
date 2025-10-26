@@ -1,12 +1,20 @@
 import os
+import torch
 import numpy as np
 import pandas as pd
+import torch.nn as nn
+import torch.nn.functional as F
 from sklearn import svm
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.inspection import permutation_importance
 from sklearn.model_selection import train_test_split
+from torch.utils.data import DataLoader
+from xgboost import XGBClassifier
 import joblib
+from .module import DeepMOI, Net
 from .utils import evaluate
+from .moanna.model.Moanna import Moanna, Moanna_cls
+from .mogonet.main_mogonet import run_mogonet
 
 
 # builing machine learning models
@@ -36,12 +44,6 @@ def ml_models(args, data, chosen_feat_name, chosen_omic_group, labels, model_nam
                 joblib.dump(model, os.path.join(args.outdir,'model_RF_{}_{}_{}.joblib'.format(args.method, args.omic_name, args.seed)))
 
     elif args.model == "XGboost" or model_name == "XGboost":
-        try:
-            from xgboost import XGBClassifier
-        except ImportError as exc:
-            raise ImportError(
-                "Model 'XGboost' requires the 'xgboost' package. Please install xgboost>=1.7.4 to use this model."
-            ) from exc
         model = XGBClassifier(random_state=args.seed)
         model.fit(X_train, y_train)
         if args.FSD:
@@ -75,9 +77,8 @@ def ml_models(args, data, chosen_feat_name, chosen_omic_group, labels, model_nam
     y_pred_test = model.predict_proba(X_test)
     acc, prec, f1, auc, recall = evaluate(pred_prob=np.array(y_pred_train),
                                           real_label=np.array(y_train))
-    train_evaluate = 'Train_ACC {:.3f} | Train_AUC {:.3f} | Train_F1_score {:.3f} | Train_Recall {:.3f} | Train_Precision {:.3f}'.format(
-                acc, auc, f1, recall, prec)
-    print(train_evaluate)
+    print('Train_ACC {:.3f} | Train_AUC {:.3f} | Train_F1_score {:.3f} | Train_Recall {:.3f} | Train_Precision {:.3f}'.format(
+                acc, auc, f1, recall, prec))
 
     acc, prec, f1, auc, recall = evaluate(pred_prob=np.array(y_pred_test),
                                           real_label=np.array(y_test))
@@ -86,7 +87,6 @@ def ml_models(args, data, chosen_feat_name, chosen_omic_group, labels, model_nam
     print(test_evaluate)
     with open(os.path.join(args.outdir, 'log.txt'), 'a') as file:
         file.writelines("------Running {} model------\n".format(model_name))
-        file.writelines(train_evaluate + '\n')
         file.writelines(test_evaluate + '\n')
     file.close()
 
@@ -105,23 +105,10 @@ def ml_models(args, data, chosen_feat_name, chosen_omic_group, labels, model_nam
                 txt.writelines(
                     f"{model_name}\t{args.method}\t{args.omic_name}\t{acc}\t{prec}\t{f1}\t{auc}\t{recall}\n")
     txt.close()
-    if args.explain:
-        from .explain import explain_ml_shap
-        explain_ml_shap(args, model, X_train, X_test, chosen_feat_name, chosen_omic_group, model_name)
+
 
 # using DNN model
 def train(args, data, labels):
-    try:
-        import torch
-        import torch.nn as nn
-        import torch.nn.functional as F
-        from torch.utils.data import DataLoader
-    except ImportError as exc:
-        raise ImportError(
-            "Model 'DNN' requires the 'torch' package. Please install PyTorch to use this model."
-        ) from exc
-    from .module import DeepMOI
-
     dataset = []
     for i in range(len(labels)):
         dataset.append([torch.tensor(data[i], dtype=torch.float),
@@ -135,14 +122,8 @@ def train(args, data, labels):
                                  lr=args.lr, weight_decay=args.weight_decay)
     dataset_train, dataset_test = train_test_split(
         dataset, test_size=args.test_size, random_state=args.seed)
-    if len(dataset_train) == 0 or len(dataset_test) == 0:
-        raise ValueError(
-            "[train] The train/test split produced an empty dataset "
-            f"(train={len(dataset_train)}, test={len(dataset_test)}). "
-            "Reduce --test_size or verify that enough samples remain after preprocessing."
-        )
     train_loader = DataLoader(dataset_train, batch_size=args.batch)
-    test_loader = DataLoader(dataset_test, batch_size=args.batch, shuffle=True, drop_last=False)
+    test_loader = DataLoader(dataset_test, batch_size=args.batch, shuffle=True, drop_last=True)
 
     for epoch in range(args.epoch):
         # 1) training model
@@ -159,18 +140,12 @@ def train(args, data, labels):
             optimizer.step()
             loss_epoch.append(loss.item())
             # prediction
-            y_pred_prob = F.softmax(out, dim=-1).detach().tolist()
+            y_pred_prob = F.softmax(out).detach().tolist()
             y_pred_probs.append(y_pred_prob)
             real_labels.append(labels)
-        if len(loss_epoch) == 0 or len(y_pred_probs) == 0:
-            raise ValueError(
-                "[train] No training batches were generated. "
-                "Check batch size and dataset size to ensure at least one batch is available."
-            )
         loss_epoch = np.mean(loss_epoch)
         y_pred_probs = np.concatenate(y_pred_probs)
         real_labels = np.concatenate(real_labels)
-        
         acc, prec, f1, auc, recall = evaluate(y_pred_probs, real_labels)
         log_train = 'Epoch {:2d} | Train Loss {:.10f} | Train_ACC {:.3f} | Train_AUC {:.3f} | Train_F1_score {:.3f} | Train_Recall {:.3f} | Train_Precision {:.3f}'.format(
             epoch, loss_epoch, acc, auc, f1, recall, prec)
@@ -189,15 +164,10 @@ def train(args, data, labels):
                 optimizer.zero_grad()
                 loss_epoch.append(loss.item())
                 # predict labels
-                y_pred_prob = F.softmax(out, dim=-1).detach().tolist()
+                y_pred_prob = F.softmax(out).detach().tolist()
                 y_pred_probs.append(y_pred_prob)
                 real_labels.append(labels)
 
-            if len(loss_epoch) == 0 or len(y_pred_probs) == 0:
-                raise ValueError(
-                    "[train] No evaluation batches were generated for the test split. "
-                    "Adjust --batch or --test_size so the test loader yields data."
-                )
             loss_epoch = np.mean(loss_epoch)
             y_pred_probs = np.concatenate(y_pred_probs)
             real_labels = np.concatenate(real_labels)
@@ -236,17 +206,6 @@ def train(args, data, labels):
 
 
 def train_net(args, data, chosen_omic_group, labels):
-    try:
-        import torch
-        import torch.nn as nn
-        import torch.nn.functional as F
-        from torch.utils.data import DataLoader
-    except ImportError as exc:
-        raise ImportError(
-            "Model 'Net' requires the 'torch' package. Please install PyTorch to use this model."
-        ) from exc
-    from .module import Net
-
     idx_rna = []
     for i, v in enumerate(chosen_omic_group):
         if v == 'rna':
@@ -275,14 +234,8 @@ def train_net(args, data, chosen_omic_group, labels):
                                  weight_decay=args.weight_decay)
     dataset_train, dataset_test = train_test_split(
         dataset, test_size=args.test_size, random_state=args.seed)
-    if len(dataset_train) == 0 or len(dataset_test) == 0:
-        raise ValueError(
-            "[train] The train/test split produced an empty dataset "
-            f"(train={len(dataset_train)}, test={len(dataset_test)}). "
-            "Reduce --test_size or verify that enough samples remain after preprocessing."
-        )
     train_loader = DataLoader(dataset_train, batch_size=args.batch)
-    test_loader = DataLoader(dataset_test, batch_size=args.batch, shuffle=True, drop_last=False)
+    test_loader = DataLoader(dataset_test, batch_size=args.batch, shuffle=True, drop_last=True)
 
     with open(os.path.join(args.outdir, 'log.txt'), 'a') as file:
         file.writelines("------Running Net model------" + '\n')
@@ -293,7 +246,7 @@ def train_net(args, data, chosen_omic_group, labels):
         loss_epoch = []
         y_pred_probs, real_labels = [], []
         for data_dna, data_rna, labels in train_loader:
-            out = model(data_dna, data_rna).to()
+            out = model(data_dna, data_rna)
             out = out.squeeze(-1)
             # loss
             loss = nn.CrossEntropyLoss()(out, labels)
@@ -302,7 +255,7 @@ def train_net(args, data, chosen_omic_group, labels):
             optimizer.step()
             loss_epoch.append(loss.item())
             # prediction
-            y_pred_prob = F.softmax(out, dim=-1).detach().tolist()
+            y_pred_prob = F.softmax(out).detach().tolist()
             y_pred_probs.append(y_pred_prob)
             real_labels.append(labels)
         loss_epoch = np.mean(loss_epoch)
@@ -327,7 +280,7 @@ def train_net(args, data, chosen_omic_group, labels):
                 optimizer.zero_grad()
                 loss_epoch.append(loss.item())
                 # predict labels
-                y_pred_prob = F.softmax(out, dim=-1).detach().tolist()
+                y_pred_prob = F.softmax(out).detach().tolist()
                 y_pred_probs.append(y_pred_prob)
                 real_labels.append(labels)
 
@@ -380,16 +333,10 @@ def evaluation(model, dataset):
     model: taining model
     dataset: training dataset or testing dataset.
     """
-    try:
-        import torch.nn.functional as F
-    except ImportError as exc:
-        raise ImportError(
-            "Evaluating torch-based models requires the 'torch' package. Please install PyTorch to use this helper."
-        ) from exc
     y_pred_probs, real_labels = [], []
     for d in dataset:
         out = model(d[0])
-        y_pred_prob = F.softmax(out, dim=-1).detach().tolist()
+        y_pred_prob = F.softmax(out).detach().tolist()
         y_pred_probs.append(y_pred_prob)
         real_labels.append(d[1].tolist())
     acc, prec, f1, auc, recall = evaluate(pred_prob=np.array(y_pred_probs),
@@ -398,19 +345,8 @@ def evaluation(model, dataset):
 
 
 # using Moanna model
-def train_moanna(args, data, labels):
-    try:
-        import torch
-        import torch.nn as nn
-        import torch.nn.functional as F
-        from torch.utils.data import DataLoader
-    except ImportError as exc:
-        raise ImportError(
-            "Model 'moanna' requires the 'torch' package. Please install PyTorch to use this model."
-        ) from exc
-    from .moanna.model.Moanna import Moanna, Moanna_cls
-
-    # Pre-defined hyperparameters
+def train_moanna(args, data, labels):    
+     # Pre-defined hyperparameters
     params = {}
     params["input_size"] = data.shape[1] # Number of features
     params["n_layers"] = 1
@@ -461,14 +397,8 @@ def train_moanna(args, data, labels):
                                  lr=args.lr, weight_decay=args.weight_decay)
     dataset_train, dataset_test = train_test_split(
         dataset, test_size=args.test_size, random_state=args.seed)
-    if len(dataset_train) == 0 or len(dataset_test) == 0:
-        raise ValueError(
-            "[train] The train/test split produced an empty dataset "
-            f"(train={len(dataset_train)}, test={len(dataset_test)}). "
-            "Reduce --test_size or verify that enough samples remain after preprocessing."
-        )
     train_loader = DataLoader(dataset_train, batch_size=args.batch)
-    test_loader = DataLoader(dataset_test, batch_size=args.batch, shuffle=True, drop_last=False)
+    test_loader = DataLoader(dataset_test, batch_size=args.batch, shuffle=True, drop_last=True)
 
     # 先train 编码器和解码器
     criterion1 = torch.nn.MSELoss(reduce=True)
@@ -497,7 +427,7 @@ def train_moanna(args, data, labels):
             optimizer.step()
             loss_epoch.append(loss.item())
             # prediction
-            y_pred_prob = F.softmax(out, dim=-1).detach().tolist()
+            y_pred_prob = F.softmax(out).detach().tolist()
             y_pred_probs.append(y_pred_prob)
             real_labels.append(labels)
         loss_epoch = np.mean(loss_epoch)
@@ -523,7 +453,7 @@ def train_moanna(args, data, labels):
                 optimizer.zero_grad()
                 loss_epoch.append(loss.item())
                 # predict labels
-                y_pred_prob = F.softmax(out, dim=-1).detach().tolist()
+                y_pred_prob = F.softmax(out).detach().tolist()
                 y_pred_probs.append(y_pred_prob)
                 real_labels.append(labels)
 
@@ -564,14 +494,6 @@ def train_moanna(args, data, labels):
 
 # using MOGONET model
 def train_mogonet(args, data, labels):
-    try:
-        import torch
-    except ImportError as exc:
-        raise ImportError(
-            "Model 'mogonet' requires the 'torch' package. Please install PyTorch to use this model."
-        ) from exc
-    from .mogonet.main_mogonet import run_mogonet
-
     dataset = []
     for i in range(len(labels)):
         dataset.append([torch.tensor(data[i], dtype=torch.float),

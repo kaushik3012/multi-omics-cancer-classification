@@ -1,6 +1,6 @@
 import argparse, warnings, sys
 import numpy as np
-from .src.main import run
+from .src.main3 import run
 
 warnings.filterwarnings('ignore')
 np.random.seed(1234)
